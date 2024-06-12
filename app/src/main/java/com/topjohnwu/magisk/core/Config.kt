@@ -1,34 +1,36 @@
 package com.topjohnwu.magisk.core
 
 import android.annotation.SuppressLint
-import android.content.SharedPreferences
-import android.util.Xml
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.content.edit
 import com.topjohnwu.magisk.BuildConfig
-import com.topjohnwu.magisk.core.utils.BiometricHelper
+import com.topjohnwu.magisk.core.di.AppContext
+import com.topjohnwu.magisk.core.di.ServiceLocator
+import com.topjohnwu.magisk.core.ktx.writeTo
+import com.topjohnwu.magisk.core.repository.BoolDBPropertyNoWrite
+import com.topjohnwu.magisk.core.repository.DBConfig
+import com.topjohnwu.magisk.core.repository.PreferenceConfig
 import com.topjohnwu.magisk.core.utils.refreshLocale
-import com.topjohnwu.magisk.data.preference.PreferenceModel
-import com.topjohnwu.magisk.data.repository.DBConfig
-import com.topjohnwu.magisk.di.ServiceLocator
 import com.topjohnwu.magisk.ui.theme.Theme
-import org.xmlpull.v1.XmlPullParser
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.runBlocking
 import java.io.File
-import java.io.InputStream
+import java.io.IOException
 
-object Config : PreferenceModel, DBConfig {
+object Config : PreferenceConfig, DBConfig {
 
     override val stringDB get() = ServiceLocator.stringDB
     override val settingsDB get() = ServiceLocator.settingsDB
     override val context get() = ServiceLocator.deContext
+    override val coroutineScope get() = GlobalScope
 
-    @get:SuppressLint("ApplySharedPref")
-    val prefsFile: File get() {
-        // Flush prefs to disk
-        prefs.edit().apply {
-            remove(Key.ASKED_HOME)
-        }.commit()
-        return File("${context.filesDir.parent}/shared_prefs", "${fileName}.xml")
+    private val prefsFile = File("${context.filesDir.parent}/shared_prefs", "${fileName}.xml")
+
+    @SuppressLint("ApplySharedPref")
+    fun getPrefsFile(): File {
+        prefs.edit().remove(Key.ASKED_HOME).commit()
+        return prefsFile
     }
 
     object Key {
@@ -37,6 +39,9 @@ object Config : PreferenceModel, DBConfig {
         const val SU_MULTIUSER_MODE = "multiuser_mode"
         const val SU_MNT_NS = "mnt_ns"
         const val SU_BIOMETRIC = "su_biometric"
+        const val ZYGISK = "zygisk"
+        const val BOOTLOOP = "bootloop"
+        const val DENYLIST = "denylist"
         const val SU_MANAGER = "requester"
         const val KEYSTORE = "keystore"
 
@@ -59,9 +64,6 @@ object Config : PreferenceModel, DBConfig {
         const val BOOT_ID = "boot_id"
         const val ASKED_HOME = "asked_home"
         const val DOH = "doh"
-
-        // system state
-        const val MAGISKHIDE = "magiskhide"
     }
 
     object Value {
@@ -71,6 +73,7 @@ object Config : PreferenceModel, DBConfig {
         const val BETA_CHANNEL = 1
         const val CUSTOM_CHANNEL = 2
         const val CANARY_CHANNEL = 3
+        const val DEBUG_CHANNEL = 4
 
         // root access mode
         const val ROOT_ACCESS_DISABLED = 0
@@ -107,13 +110,15 @@ object Config : PreferenceModel, DBConfig {
 
     private val defaultChannel =
         if (BuildConfig.DEBUG)
+            Value.DEBUG_CHANNEL
+        else if (Const.APP_IS_CANARY)
             Value.CANARY_CHANNEL
         else
             Value.DEFAULT_CHANNEL
 
-    @JvmStatic var keepVerity = false
-    @JvmStatic var keepEnc = false
-    @JvmStatic var recovery = false
+    @JvmField var keepVerity = false
+    @JvmField var keepEnc = false
+    @JvmField var recovery = false
 
     var bootId by preference(Key.BOOT_ID, "")
     var askedHome by preference(Key.ASKED_HOME, false)
@@ -131,9 +136,16 @@ object Config : PreferenceModel, DBConfig {
     var themeOrdinal by preference(Key.THEME_ORDINAL, Theme.Piplup.ordinal)
     var suReAuth by preference(Key.SU_REAUTH, false)
     var suTapjack by preference(Key.SU_TAPJACK, true)
-    var checkUpdate by preference(Key.CHECK_UPDATES, true)
+    private var checkUpdatePrefs by preference(Key.CHECK_UPDATES, true)
+    var checkUpdate
+        get() = checkUpdatePrefs
+        set(value) {
+            if (checkUpdatePrefs != value) {
+                checkUpdatePrefs = value
+                JobService.schedule(AppContext)
+            }
+        }
     var doh by preference(Key.DOH, false)
-    var magiskHide by preference(Key.MAGISKHIDE, true)
     var showSystemApp by preference(Key.SHOW_SYSTEM_APP, false)
 
     var customChannelUrl by preference(Key.CUSTOM_CHANNEL, "")
@@ -148,7 +160,15 @@ object Config : PreferenceModel, DBConfig {
     var rootMode by dbSettings(Key.ROOT_ACCESS, Value.ROOT_ACCESS_APPS_AND_ADB)
     var suMntNamespaceMode by dbSettings(Key.SU_MNT_NS, Value.NAMESPACE_MODE_REQUESTER)
     var suMultiuserMode by dbSettings(Key.SU_MULTIUSER_MODE, Value.MULTIUSER_MODE_OWNER_ONLY)
-    var suBiometric by dbSettings(Key.SU_BIOMETRIC, false)
+    private var suBiometric by dbSettings(Key.SU_BIOMETRIC, false)
+    var userAuth
+        get() = Info.isDeviceSecure && suBiometric
+        set(value) {
+            suBiometric = value
+        }
+    var zygisk by dbSettings(Key.ZYGISK, false)
+    var bootloop by dbSettings(Key.BOOTLOOP, 0)
+    var denyList by BoolDBPropertyNoWrite(Key.DENYLIST, false)
     var suManager by dbStrings(Key.SU_MANAGER, "", true)
     var keyStoreRaw by dbStrings(Key.KEYSTORE, "", true)
 
@@ -156,10 +176,15 @@ object Config : PreferenceModel, DBConfig {
 
     fun load(pkg: String?) {
         // Only try to load prefs when fresh install and a previous package name is set
-        if (pkg != null && prefs.all.isEmpty()) runCatching {
-            context.contentResolver.openInputStream(Provider.PREFS_URI(pkg))?.use {
-                prefs.edit { parsePrefs(it) }
+        if (pkg != null && prefs.all.isEmpty()) {
+            runBlocking {
+                try {
+                    context.contentResolver
+                        .openInputStream(Provider.preferencesUri(pkg))
+                        ?.writeTo(prefsFile, dispatcher = Dispatchers.Unconfined)
+                } catch (ignored: IOException) {}
             }
+            return
         }
 
         prefs.edit {
@@ -168,63 +193,10 @@ object Config : PreferenceModel, DBConfig {
                 suBiometric = true
             remove(SU_FINGERPRINT)
             prefs.getString(Key.UPDATE_CHANNEL, null).also {
-                if (it == null)
+                if (it == null ||
+                    it.toInt() > Value.DEBUG_CHANNEL ||
+                    it.toInt() < Value.DEFAULT_CHANNEL) {
                     putString(Key.UPDATE_CHANNEL, defaultChannel.toString())
-                else if (it.toInt() > Value.CANARY_CHANNEL)
-                    putString(Key.UPDATE_CHANNEL, Value.CANARY_CHANNEL.toString())
-            }
-
-            // Write database configs
-            putString(Key.ROOT_ACCESS, rootMode.toString())
-            putString(Key.SU_MNT_NS, suMntNamespaceMode.toString())
-            putString(Key.SU_MULTIUSER_MODE, suMultiuserMode.toString())
-            putBoolean(Key.SU_BIOMETRIC, BiometricHelper.isEnabled)
-        }
-    }
-
-    private fun SharedPreferences.Editor.parsePrefs(input: InputStream) {
-        runCatching {
-            val parser = Xml.newPullParser()
-            parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
-            parser.setInput(input, "UTF-8")
-            parser.nextTag()
-            parser.require(XmlPullParser.START_TAG, null, "map")
-            while (parser.next() != XmlPullParser.END_TAG) {
-                if (parser.eventType != XmlPullParser.START_TAG)
-                    continue
-                val key: String = parser.getAttributeValue(null, "name")
-                fun value() = parser.getAttributeValue(null, "value")!!
-                when (parser.name) {
-                    "string" -> {
-                        parser.require(XmlPullParser.START_TAG, null, "string")
-                        putString(key, parser.nextText())
-                        parser.require(XmlPullParser.END_TAG, null, "string")
-                    }
-                    "boolean" -> {
-                        parser.require(XmlPullParser.START_TAG, null, "boolean")
-                        putBoolean(key, value().toBoolean())
-                        parser.nextTag()
-                        parser.require(XmlPullParser.END_TAG, null, "boolean")
-                    }
-                    "int" -> {
-                        parser.require(XmlPullParser.START_TAG, null, "int")
-                        putInt(key, value().toInt())
-                        parser.nextTag()
-                        parser.require(XmlPullParser.END_TAG, null, "int")
-                    }
-                    "long" -> {
-                        parser.require(XmlPullParser.START_TAG, null, "long")
-                        putLong(key, value().toLong())
-                        parser.nextTag()
-                        parser.require(XmlPullParser.END_TAG, null, "long")
-                    }
-                    "float" -> {
-                        parser.require(XmlPullParser.START_TAG, null, "int")
-                        putFloat(key, value().toFloat())
-                        parser.nextTag()
-                        parser.require(XmlPullParser.END_TAG, null, "int")
-                    }
-                    else -> parser.next()
                 }
             }
         }

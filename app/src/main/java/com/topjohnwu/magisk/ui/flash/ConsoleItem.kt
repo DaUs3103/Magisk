@@ -6,16 +6,20 @@ import androidx.core.view.updateLayoutParams
 import androidx.databinding.ViewDataBinding
 import androidx.recyclerview.widget.RecyclerView
 import com.topjohnwu.magisk.R
-import com.topjohnwu.magisk.databinding.ComparableRvItem
-import com.topjohnwu.magisk.databinding.LenientRvItem
+import com.topjohnwu.magisk.databinding.DiffItem
+import com.topjohnwu.magisk.databinding.ItemWrapper
+import com.topjohnwu.magisk.databinding.RvItem
+import com.topjohnwu.magisk.databinding.ViewAwareItem
 import kotlin.math.max
 
-class ConsoleItem(val item: String) : ComparableRvItem<ConsoleItem>(), LenientRvItem {
+class ConsoleItem(
+    override val item: String
+) : RvItem(), ViewAwareItem, DiffItem<ConsoleItem>, ItemWrapper<String> {
     override val layoutRes = R.layout.item_console_md2
 
     private var parentWidth = -1
 
-    override fun onBindingBound(binding: ViewDataBinding, recyclerView: RecyclerView) {
+    override fun onBind(binding: ViewDataBinding, recyclerView: RecyclerView) {
         if (parentWidth < 0)
             parentWidth = (recyclerView.parent as View).width
 
@@ -31,7 +35,4 @@ class ConsoleItem(val item: String) : ComparableRvItem<ConsoleItem>(), LenientRv
             recyclerView.requestLayout()
         }
     }
-
-    override fun contentSameAs(other: ConsoleItem) = itemSameAs(other)
-    override fun itemSameAs(other: ConsoleItem) = item == other.item
 }

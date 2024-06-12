@@ -1,11 +1,10 @@
 package com.topjohnwu.magisk.view
 
 import com.topjohnwu.magisk.R
-import com.topjohnwu.magisk.databinding.ComparableRvItem
+import com.topjohnwu.magisk.databinding.DiffItem
+import com.topjohnwu.magisk.databinding.ItemWrapper
+import com.topjohnwu.magisk.databinding.RvItem
 
-class TextItem(val text: Int) : ComparableRvItem<TextItem>() {
+class TextItem(override val item: Int) : RvItem(), DiffItem<TextItem>, ItemWrapper<Int> {
     override val layoutRes = R.layout.item_text
-
-    override fun contentSameAs(other: TextItem) = text == other.text
-    override fun itemSameAs(other: TextItem) = contentSameAs(other)
 }

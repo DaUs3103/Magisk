@@ -4,12 +4,15 @@ import android.animation.ValueAnimator
 import android.content.res.ColorStateList
 import android.graphics.Paint
 import android.graphics.drawable.Drawable
+import android.text.Spanned
 import android.util.TypedValue
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.ImageView
 import android.widget.ProgressBar
+import android.widget.Spinner
 import android.widget.TextView
 import androidx.annotation.DrawableRes
 import androidx.appcompat.widget.Toolbar
@@ -22,18 +25,20 @@ import androidx.databinding.BindingAdapter
 import androidx.databinding.InverseBindingAdapter
 import androidx.databinding.InverseBindingListener
 import androidx.interpolator.view.animation.FastOutSlowInInterpolator
-import androidx.recyclerview.widget.*
+import androidx.recyclerview.widget.DividerItemDecoration
+import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.StaggeredGridLayoutManager
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
 import com.google.android.material.chip.Chip
 import com.google.android.material.textfield.TextInputLayout
 import com.topjohnwu.magisk.R
-import com.topjohnwu.magisk.di.ServiceLocator
-import com.topjohnwu.magisk.ktx.coroutineScope
-import com.topjohnwu.magisk.ktx.replaceRandomWithSpecial
+import com.topjohnwu.magisk.core.di.ServiceLocator
+import com.topjohnwu.magisk.utils.TextHolder
 import com.topjohnwu.superuser.internal.UiThreadHandler
 import com.topjohnwu.widget.IndeterminateCheckBox
-import kotlinx.coroutines.*
 import kotlin.math.roundToInt
 
 @BindingAdapter("gone")
@@ -57,10 +62,8 @@ fun setInvisibleUnless(view: View, invisibleUnless: Boolean) {
 }
 
 @BindingAdapter("markdownText")
-fun setMarkdownText(tv: TextView, text: CharSequence) {
-    tv.coroutineScope.launch(Dispatchers.IO) {
-        ServiceLocator.markwon.setMarkdown(tv, text.toString())
-    }
+fun setMarkdownText(tv: TextView, markdown: Spanned) {
+    ServiceLocator.markwon.setParsedMarkdown(tv, markdown)
 }
 
 @BindingAdapter("onNavigationClick")
@@ -76,22 +79,6 @@ fun setImageResource(view: ImageView, @DrawableRes resId: Int) {
 @BindingAdapter("srcCompat")
 fun setImageResource(view: ImageView, drawable: Drawable) {
     view.setImageDrawable(drawable)
-}
-
-@BindingAdapter("movieBehavior", "movieBehaviorText")
-fun setMovieBehavior(view: TextView, isMovieBehavior: Boolean, text: String) {
-    (view.tag as? Job)?.cancel()
-    view.tag = null
-    if (isMovieBehavior) {
-        view.tag = GlobalScope.launch(Dispatchers.Main.immediate) {
-            while (true) {
-                delay(150)
-                view.text = text.replaceRandomWithSpecial()
-            }
-        }
-    } else {
-        view.text = text
-    }
 }
 
 @BindingAdapter("onTouch")
@@ -308,4 +295,14 @@ fun TextView.setTextColorAttr(attr: Int) {
     val tv = TypedValue()
     context.theme.resolveAttribute(attr, tv, true)
     setTextColor(tv.data)
+}
+
+@BindingAdapter("android:text")
+fun TextView.setText(text: TextHolder) {
+    this.text = text.getText(context.resources)
+}
+
+@BindingAdapter("items", "layout")
+fun Spinner.setAdapter(items: Array<Any>, layoutRes: Int) {
+    adapter = ArrayAdapter(context, layoutRes, items)
 }

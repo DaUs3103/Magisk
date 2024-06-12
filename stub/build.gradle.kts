@@ -1,40 +1,40 @@
 plugins {
     id("com.android.application")
+    id("org.lsposed.lsparanoid")
+}
+
+lsparanoid {
+    seed = if (RAND_SEED != 0) RAND_SEED else null
+    includeDependencies = true
+    global = true
 }
 
 android {
+    namespace = "com.topjohnwu.magisk"
+
     val canary = !Config.version.contains(".")
 
-    val url = Config["DEV_CHANNEL"] ?: if (canary) null
+    val url = if (canary) null
     else "https://cdn.jsdelivr.net/gh/topjohnwu/magisk-files@${Config.version}/app-release.apk"
 
     defaultConfig {
         applicationId = "com.topjohnwu.magisk"
         versionCode = 1
-        versionName = Config.version
-        buildConfigField("int", "STUB_VERSION", Config.stubVersion)
+        versionName = "1.0"
         buildConfigField("String", "APK_URL", url?.let { "\"$it\"" } ?: "null" )
     }
 
     buildTypes {
-        getByName("release") {
+        release {
             isMinifyEnabled = true
             isShrinkResources = false
             proguardFiles("proguard-rules.pro")
         }
     }
-
-    aaptOptions {
-        additionalParameters("--package-id", "0x80")
-    }
-
-    dependenciesInfo {
-        includeInApk = false
-        includeInBundle = false
-    }
 }
 
+setupStub()
+
 dependencies {
-    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.jar"))))
     implementation(project(":app:shared"))
 }

@@ -9,11 +9,11 @@
 
         <variable
             name="item"
-            type="com.topjohnwu.magisk.ui.hide.HideRvItem" />
+            type="com.topjohnwu.magisk.ui.deny.DenyListRvItem" />
 
         <variable
             name="viewModel"
-            type="com.topjohnwu.magisk.ui.hide.HideViewModel" />
+            type="com.topjohnwu.magisk.ui.deny.DenyListViewModel" />
 
     </data>
 
@@ -35,6 +35,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:background="?selectableItemBackground"
+                android:clickable="true"
+                android:focusable="true"
                 android:nextFocusRight="@id/hide_expand_icon"
                 android:onClick="@{item::toggleExpand}">
 
@@ -80,7 +82,7 @@
 
                 <com.topjohnwu.widget.IndeterminateCheckBox
                     android:id="@+id/hide_expand_icon"
-                    state="@={item.hiddenState}"
+                    state="@={item.state}"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_marginEnd="@dimen/l1"
@@ -95,8 +97,8 @@
 
             <androidx.recyclerview.widget.RecyclerView
                 goneUnless="@{item.isExpanded}"
-                itemBinding="@{viewModel.itemInternalBinding}"
-                items="@{item.processes}"
+                app:items="@{item.processes}"
+                app:extraBindings="@{viewModel.extraBindings}"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:background="?colorSurfaceVariant"

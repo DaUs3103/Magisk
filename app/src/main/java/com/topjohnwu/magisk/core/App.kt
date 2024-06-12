@@ -1,92 +1,127 @@
 package com.topjohnwu.magisk.core
 
-import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.content.res.Configuration
 import android.os.Bundle
-import androidx.appcompat.app.AppCompatDelegate
-import androidx.work.WorkManager
-import com.topjohnwu.magisk.DynAPK
-import com.topjohnwu.magisk.core.utils.AppShellInit
-import com.topjohnwu.magisk.core.utils.BusyBoxInit
-import com.topjohnwu.magisk.core.utils.IODispatcherExecutor
-import com.topjohnwu.magisk.core.utils.updateConfig
-import com.topjohnwu.magisk.di.ServiceLocator
-import com.topjohnwu.magisk.ktx.unwrap
+import android.system.Os
+import androidx.profileinstaller.ProfileInstaller
+import com.topjohnwu.magisk.BuildConfig
+import com.topjohnwu.magisk.StubApk
+import com.topjohnwu.magisk.core.di.ServiceLocator
+import com.topjohnwu.magisk.core.utils.DispatcherExecutor
+import com.topjohnwu.magisk.core.utils.NetworkObserver
+import com.topjohnwu.magisk.core.utils.ProcessLifecycle
+import com.topjohnwu.magisk.core.utils.RootUtils
+import com.topjohnwu.magisk.core.utils.ShellInit
+import com.topjohnwu.magisk.core.utils.refreshLocale
+import com.topjohnwu.magisk.core.utils.setConfig
+import com.topjohnwu.magisk.ui.surequest.SuRequestActivity
+import com.topjohnwu.magisk.view.Notifications
 import com.topjohnwu.superuser.Shell
+import com.topjohnwu.superuser.internal.UiThreadHandler
+import com.topjohnwu.superuser.ipc.RootService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 import timber.log.Timber
+import java.lang.ref.WeakReference
 import kotlin.system.exitProcess
 
 open class App() : Application() {
 
     constructor(o: Any) : this() {
-        Info.stub = DynAPK.load(o)
+        val data = StubApk.Data(o)
+        // Add the root service name mapping
+        data.classToComponent[RootUtils::class.java.name] = data.rootService.name
+        // Send back the actual root service class
+        data.rootService = RootUtils::class.java
+        Info.stub = data
     }
 
     init {
-        AppCompatDelegate.setCompatVectorFromResourcesEnabled(true)
-        Shell.setDefaultBuilder(Shell.Builder.create()
-            .setFlags(Shell.FLAG_MOUNT_MASTER)
-            .setInitializers(BusyBoxInit::class.java, AppShellInit::class.java)
-            .setTimeout(2))
-        Shell.EXECUTOR = IODispatcherExecutor()
-
         // Always log full stack trace with Timber
         Timber.plant(Timber.DebugTree())
         Thread.setDefaultUncaughtExceptionHandler { _, e ->
             Timber.e(e)
             exitProcess(1)
         }
+
+        Os.setenv("PATH", "${Os.getenv("PATH")}:/debug_ramdisk:/sbin", true)
     }
 
-    override fun attachBaseContext(base: Context) {
-        // Some context magic
+    override fun attachBaseContext(context: Context) {
+        // Get the actual ContextImpl
         val app: Application
-        val impl: Context
-        if (base is Application) {
-            app = base
-            impl = base.baseContext
+        val base: Context
+        if (context is Application) {
+            app = context
+            base = context.baseContext
+            AppApkPath = StubApk.current(base).path
         } else {
             app = this
-            impl = base
+            base = context
+            AppApkPath = base.packageResourcePath
         }
-        val wrapped = impl.wrap()
-        super.attachBaseContext(wrapped)
+        super.attachBaseContext(base)
+        ServiceLocator.context = base
+        app.registerActivityLifecycleCallbacks(ActivityTracker)
 
-        ServiceLocator.context = wrapped
-        AssetHack.init(impl)
-        app.registerActivityLifecycleCallbacks(ForegroundTracker)
-        WorkManager.initialize(impl.wrapJob(), androidx.work.Configuration.Builder().build())
+        Shell.setDefaultBuilder(Shell.Builder.create()
+            .setFlags(Shell.FLAG_MOUNT_MASTER)
+            .setInitializers(ShellInit::class.java)
+            .setContext(base)
+            .setTimeout(2))
+        Shell.EXECUTOR = DispatcherExecutor(Dispatchers.IO)
+        RootUtils.bindTask = RootService.bindOrTask(
+            intent<RootUtils>(),
+            UiThreadHandler.executor,
+            RootUtils.Connection
+        )
+        // Pre-heat the shell ASAP
+        Shell.getShell(null) {}
+
+        refreshLocale()
+        resources.patch()
+        Notifications.setup()
     }
 
-    // This is required as some platforms expect ContextImpl
-    override fun getBaseContext(): Context {
-        return super.getBaseContext().unwrap()
+    override fun onCreate() {
+        super.onCreate()
+        ProcessLifecycle.init(this)
+        NetworkObserver.init(this)
+        if (!BuildConfig.DEBUG && !isRunningAsStub) {
+            GlobalScope.launch(Dispatchers.IO) {
+                ProfileInstaller.writeProfile(this@App)
+            }
+        }
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
-        resources.updateConfig(newConfig)
+        if (resources.configuration.diff(newConfig) != 0) {
+            resources.setConfig(newConfig)
+        }
         if (!isRunningAsStub)
             super.onConfigurationChanged(newConfig)
     }
 }
 
-@SuppressLint("StaticFieldLeak")
-object ForegroundTracker : Application.ActivityLifecycleCallbacks {
+object ActivityTracker : Application.ActivityLifecycleCallbacks {
+
+    val foreground: Activity? get() = ref.get()
 
     @Volatile
-    var foreground: Activity? = null
-
-    val hasForeground get() = foreground != null
+    private var ref = WeakReference<Activity>(null)
 
     override fun onActivityResumed(activity: Activity) {
-        foreground = activity
+        if (activity is SuRequestActivity) return
+        ref = WeakReference(activity)
     }
 
     override fun onActivityPaused(activity: Activity) {
-        foreground = null
+        if (activity is SuRequestActivity) return
+        ref.clear()
     }
 
     override fun onActivityCreated(activity: Activity, bundle: Bundle?) {}

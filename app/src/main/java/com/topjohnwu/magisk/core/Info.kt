@@ -1,22 +1,19 @@
 package com.topjohnwu.magisk.core
 
-import android.os.Build
-import androidx.databinding.ObservableBoolean
-import com.topjohnwu.magisk.DynAPK
+import android.app.KeyguardManager
+import androidx.lifecycle.MutableLiveData
+import com.topjohnwu.magisk.StubApk
+import com.topjohnwu.magisk.core.di.AppContext
+import com.topjohnwu.magisk.core.ktx.getProperty
 import com.topjohnwu.magisk.core.model.UpdateInfo
-import com.topjohnwu.magisk.core.utils.net.NetworkObserver
-import com.topjohnwu.magisk.data.repository.NetworkService
-import com.topjohnwu.magisk.di.AppContext
-import com.topjohnwu.magisk.ktx.getProperty
-import com.topjohnwu.superuser.Shell
+import com.topjohnwu.magisk.core.repository.NetworkService
 import com.topjohnwu.superuser.ShellUtils.fastCmd
-import com.topjohnwu.superuser.internal.UiThreadHandler
 
 val isRunningAsStub get() = Info.stub != null
 
 object Info {
 
-    var stub: DynAPK.Data? = null
+    var stub: StubApk.Data? = null
 
     val EMPTY_REMOTE = UpdateInfo()
     var remote = EMPTY_REMOTE
@@ -29,47 +26,50 @@ object Info {
     // Device state
     @JvmStatic val env by lazy { loadState() }
     @JvmField var isSAR = false
-    @JvmField var isAB = false
-    @JvmField val isVirtualAB = getProperty("ro.virtual_ab.enabled", "false") == "true"
+    var legacySAR = false
+    var isAB = false
+    @JvmField val isZygiskEnabled = System.getenv("ZYGISK_ENABLED") == "1"
     @JvmStatic val isFDE get() = crypto == "block"
     @JvmField var ramdisk = false
-    @JvmField var hasGMS = true
-    @JvmField val isPixel = Build.BRAND == "google"
-    @JvmField val isEmulator =
-        getProperty("ro.kernel.qemu", "0") == "1" ||
-        getProperty("ro.boot.qemu", "0") == "1"
+    var patchBootVbmeta = false
     var crypto = ""
     var noDataExec = false
+    var isRooted = false
 
-    val isConnected by lazy {
-        ObservableBoolean(false).also { field ->
-            NetworkObserver.observe(AppContext) {
-                UiThreadHandler.run { field.set(it) }
-            }
-        }
+    @JvmField var hasGMS = true
+    @JvmField val isEmulator =
+        getProperty("ro.kernel.qemu", "0") == "1" ||
+            getProperty("ro.boot.qemu", "0") == "1"
+
+    val isConnected = MutableLiveData(false)
+
+    val showSuperUser: Boolean get() {
+        return env.isActive && (Const.USER_ID == 0
+                || Config.suMultiuserMode == Config.Value.MULTIUSER_MODE_USER)
     }
 
-    private fun loadState() = Env(
-        fastCmd("magisk -v").split(":".toRegex())[0],
-        runCatching { fastCmd("magisk -V").toInt() }.getOrDefault(-1),
-        Shell.su("magiskhide status").exec().isSuccess
-    )
+    val isDeviceSecure get() =
+        AppContext.getSystemService(KeyguardManager::class.java).isDeviceSecure
+
+    private fun loadState(): Env {
+        val v = fastCmd("magisk -v").split(":".toRegex())
+        return Env(
+            v[0], v.size >= 3 && v[2] == "D",
+            runCatching { fastCmd("magisk -V").toInt() }.getOrDefault(-1)
+        )
+    }
 
     class Env(
-        val magiskVersionString: String = "",
-        code: Int = -1,
-        hide: Boolean = false
+        val versionString: String = "",
+        val isDebug: Boolean = false,
+        code: Int = -1
     ) {
-        val magiskHide get() = Config.magiskHide
-        val magiskVersionCode = when {
+        val versionCode = when {
             code < Const.Version.MIN_VERCODE -> -1
-            else -> if (Shell.rootAccess()) code else -1
+            isRooted ->  code
+            else -> -1
         }
         val isUnsupported = code > 0 && code < Const.Version.MIN_VERCODE
-        val isActive = magiskVersionCode >= 0
-
-        init {
-            Config.magiskHide = hide
-        }
+        val isActive = versionCode > 0
     }
 }

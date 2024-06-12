@@ -23,13 +23,14 @@
             android:layout_height="match_parent" />
 
         <com.google.android.material.floatingactionbutton.FloatingActionButton
+            gone="@{viewModel.loading}"
             android:id="@+id/log_filter_toggle"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="bottom|end"
             android:layout_marginStart="@dimen/l1"
             android:layout_marginEnd="@dimen/l1"
-            android:layout_marginBottom="@dimen/l1"
+            android:layout_marginBottom="72dp"
             app:layout_fitsSystemWindowsInsets="bottom"
             app:backgroundTint="?colorSurfaceSurfaceVariant"
             app:srcCompat="@drawable/ic_folder_list"

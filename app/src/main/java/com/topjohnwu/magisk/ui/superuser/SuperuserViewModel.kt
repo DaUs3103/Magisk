@@ -1,143 +1,177 @@
 package com.topjohnwu.magisk.ui.superuser
 
+import android.annotation.SuppressLint
+import android.content.pm.PackageManager
+import android.content.pm.PackageManager.MATCH_UNINSTALLED_PACKAGES
+import android.os.Process
+import androidx.databinding.Bindable
 import androidx.databinding.ObservableArrayList
 import androidx.lifecycle.viewModelScope
 import com.topjohnwu.magisk.BR
 import com.topjohnwu.magisk.R
-import com.topjohnwu.magisk.arch.BaseViewModel
-import com.topjohnwu.magisk.arch.adapterOf
-import com.topjohnwu.magisk.arch.diffListOf
-import com.topjohnwu.magisk.arch.itemBindingOf
+import com.topjohnwu.magisk.arch.AsyncLoadViewModel
 import com.topjohnwu.magisk.core.Config
-import com.topjohnwu.magisk.core.magiskdb.PolicyDao
+import com.topjohnwu.magisk.core.Info
+import com.topjohnwu.magisk.core.data.magiskdb.PolicyDao
+import com.topjohnwu.magisk.core.di.AppContext
+import com.topjohnwu.magisk.core.ktx.getLabel
 import com.topjohnwu.magisk.core.model.su.SuPolicy
-import com.topjohnwu.magisk.core.utils.BiometricHelper
 import com.topjohnwu.magisk.core.utils.currentLocale
-import com.topjohnwu.magisk.databinding.ComparableRvItem
+import com.topjohnwu.magisk.databinding.MergeObservableList
+import com.topjohnwu.magisk.databinding.RvItem
+import com.topjohnwu.magisk.databinding.bindExtra
+import com.topjohnwu.magisk.databinding.diffList
+import com.topjohnwu.magisk.databinding.set
+import com.topjohnwu.magisk.dialog.SuperuserRevokeDialog
+import com.topjohnwu.magisk.events.AuthEvent
 import com.topjohnwu.magisk.events.SnackbarEvent
-import com.topjohnwu.magisk.events.dialog.BiometricEvent
-import com.topjohnwu.magisk.events.dialog.SuperuserRevokeDialog
-import com.topjohnwu.magisk.utils.Utils
 import com.topjohnwu.magisk.utils.asText
-import com.topjohnwu.magisk.view.TappableHeadlineItem
 import com.topjohnwu.magisk.view.TextItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import me.tatarka.bindingcollectionadapter2.collections.MergeObservableList
 
 class SuperuserViewModel(
     private val db: PolicyDao
-) : BaseViewModel(), TappableHeadlineItem.Listener {
+) : AsyncLoadViewModel() {
 
     private val itemNoData = TextItem(R.string.superuser_policy_none)
 
-    private val itemsPolicies = diffListOf<PolicyRvItem>()
     private val itemsHelpers = ObservableArrayList<TextItem>()
+    private val itemsPolicies = diffList<PolicyRvItem>()
 
-    val adapter = adapterOf<ComparableRvItem<*>>()
-    val items = MergeObservableList<ComparableRvItem<*>>().apply {
-        if (Config.magiskHide)
-            insertItem(TappableHeadlineItem.Hide)
-    }.insertList(itemsHelpers)
+    val items = MergeObservableList<RvItem>()
+        .insertList(itemsHelpers)
         .insertList(itemsPolicies)
-    val itemBinding = itemBindingOf<ComparableRvItem<*>> {
-        it.bindExtra(BR.listener, this)
+    val extraBindings = bindExtra {
+        it.put(BR.listener, this)
     }
 
-    // ---
+    @get:Bindable
+    var loading = true
+        private set(value) = set(value, field, { field = it }, BR.loading)
 
-    override fun refresh() = viewModelScope.launch {
-        if (!Utils.showSuperUser()) {
-            state = State.LOADING_FAILED
-            return@launch
+    @SuppressLint("InlinedApi")
+    override suspend fun doLoadWork() {
+        if (!Info.showSuperUser) {
+            loading = false
+            return
         }
-        state = State.LOADING
-        val (policies, diff) = withContext(Dispatchers.Default) {
+        loading = true
+        withContext(Dispatchers.IO) {
             db.deleteOutdated()
-            val policies = db.fetchAll {
-                PolicyRvItem(it, it.icon, this@SuperuserViewModel)
-            }.sortedWith(compareBy(
-                { it.item.appName.toLowerCase(currentLocale) },
-                { it.item.packageName }
+            db.delete(AppContext.applicationInfo.uid)
+            val policies = ArrayList<PolicyRvItem>()
+            val pm = AppContext.packageManager
+            for (policy in db.fetchAll()) {
+                val pkgs =
+                    if (policy.uid == Process.SYSTEM_UID) arrayOf("android")
+                    else pm.getPackagesForUid(policy.uid)
+                if (pkgs == null) {
+                    db.delete(policy.uid)
+                    continue
+                }
+                val map = pkgs.mapNotNull { pkg ->
+                    try {
+                        val info = pm.getPackageInfo(pkg, MATCH_UNINSTALLED_PACKAGES)
+                        PolicyRvItem(
+                            this@SuperuserViewModel, policy,
+                            info.packageName,
+                            info.sharedUserId != null,
+                            info.applicationInfo.loadIcon(pm),
+                            info.applicationInfo.getLabel(pm)
+                        )
+                    } catch (e: PackageManager.NameNotFoundException) {
+                        null
+                    }
+                }
+                if (map.isEmpty()) {
+                    db.delete(policy.uid)
+                    continue
+                }
+                policies.addAll(map)
+            }
+            policies.sortWith(compareBy(
+                { it.appName.lowercase(currentLocale) },
+                { it.packageName }
             ))
-            policies to itemsPolicies.calculateDiff(policies)
+            itemsPolicies.update(policies)
         }
-        itemsPolicies.update(policies, diff)
         if (itemsPolicies.isNotEmpty())
             itemsHelpers.clear()
         else if (itemsHelpers.isEmpty())
             itemsHelpers.add(itemNoData)
-        state = State.LOADED
+        loading = false
     }
 
     // ---
 
-    override fun onItemPressed(item: TappableHeadlineItem) = when (item) {
-        TappableHeadlineItem.Hide -> hidePressed()
-        else -> Unit
-    }
-
-    private fun hidePressed() =
-        SuperuserFragmentDirections.actionSuperuserFragmentToHideFragment().navigate()
-
     fun deletePressed(item: PolicyRvItem) {
         fun updateState() = viewModelScope.launch {
             db.delete(item.item.uid)
-            itemsPolicies.removeAll { it.genericItemSameAs(item) }
-            if (itemsPolicies.isEmpty() && itemsHelpers.isEmpty()) {
+            val list = ArrayList(itemsPolicies)
+            list.removeAll { it.item.uid == item.item.uid }
+            itemsPolicies.update(list)
+            if (list.isEmpty() && itemsHelpers.isEmpty()) {
                 itemsHelpers.add(itemNoData)
             }
         }
 
-        if (BiometricHelper.isEnabled) {
-            BiometricEvent {
-                onSuccess { updateState() }
-            }.publish()
+        if (Config.userAuth) {
+            AuthEvent { updateState() }.publish()
         } else {
-            SuperuserRevokeDialog {
-                appName = item.item.appName
-                onSuccess { updateState() }
-            }.publish()
+            SuperuserRevokeDialog(item.title) { updateState() }.show()
         }
     }
 
-    //---
-
-    fun updatePolicy(policy: SuPolicy, isLogging: Boolean) = viewModelScope.launch {
-        db.update(policy)
-        val res = when {
-            isLogging -> when {
-                policy.logging -> R.string.su_snack_log_on
-                else -> R.string.su_snack_log_off
-            }
-            else -> when {
-                policy.notification -> R.string.su_snack_notif_on
+    fun updateNotify(item: PolicyRvItem) {
+        viewModelScope.launch {
+            db.update(item.item)
+            val res = when {
+                item.item.notification -> R.string.su_snack_notif_on
                 else -> R.string.su_snack_notif_off
             }
+            itemsPolicies.forEach {
+                if (it.item.uid == item.item.uid) {
+                    it.notifyPropertyChanged(BR.shouldNotify)
+                }
+            }
+            SnackbarEvent(res.asText(item.appName)).publish()
         }
-        SnackbarEvent(res.asText(policy.appName)).publish()
+    }
+
+    fun updateLogging(item: PolicyRvItem) {
+        viewModelScope.launch {
+            db.update(item.item)
+            val res = when {
+                item.item.logging -> R.string.su_snack_log_on
+                else -> R.string.su_snack_log_off
+            }
+            itemsPolicies.forEach {
+                if (it.item.uid == item.item.uid) {
+                    it.notifyPropertyChanged(BR.shouldLog)
+                }
+            }
+            SnackbarEvent(res.asText(item.appName)).publish()
+        }
     }
 
     fun togglePolicy(item: PolicyRvItem, enable: Boolean) {
+        val items = itemsPolicies.filter { it.item.uid == item.item.uid }
         fun updateState() {
-            item.policyState = enable
-
-            val policy = if (enable) SuPolicy.ALLOW else SuPolicy.DENY
-            val app = item.item.copy(policy = policy)
-
             viewModelScope.launch {
-                db.update(app)
-                val res = if (app.policy == SuPolicy.ALLOW) R.string.su_snack_grant
-                else R.string.su_snack_deny
-                SnackbarEvent(res.asText(item.item.appName)).publish()
+                val res = if (enable) R.string.su_snack_grant else R.string.su_snack_deny
+                item.item.policy = if (enable) SuPolicy.ALLOW else SuPolicy.DENY
+                db.update(item.item)
+                items.forEach {
+                    it.notifyPropertyChanged(BR.enabled)
+                }
+                SnackbarEvent(res.asText(item.appName)).publish()
             }
         }
 
-        if (BiometricHelper.isEnabled) {
-            BiometricEvent {
-                onSuccess { updateState() }
-            }.publish()
+        if (Config.userAuth) {
+            AuthEvent { updateState() }.publish()
         } else {
             updateState()
         }
